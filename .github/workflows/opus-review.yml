@@ -1,11 +1,184 @@
-# Opus 4.6 automated code review — calls the shared reusable workflow
+# Opus 4.6 automated code review — standalone (no workflow_call)
+# Scripts sourced from skillbar-ai/.github (public)
 name: Opus Review
+
 on:
   pull_request:
     types: [opened, synchronize, reopened]
 
+defaults:
+  run:
+    shell: bash -euo pipefail {0}
+
 jobs:
   opus-review:
-    uses: skillbar-ai/.github/.github/workflows/opus-review.yml@main
-    secrets:
-      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      pull-requests: write
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.2.2
+
+      - name: Checkout Opus scripts
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.2.2
+        with:
+          repository: skillbar-ai/.github
+          path: .opus-scripts
+          sparse-checkout: scripts
+
+      - name: Verify jq version (>= 1.6)
+        run: |
+          if ! command -v jq >/dev/null 2>&1; then
+            echo "::error::jq is not installed"
+            exit 1
+          fi
+          version="$(jq --version | sed 's/^jq-//')"
+          required="1.6"
+          if [[ "$(printf '%s\n' "$required" "$version" | sort -V | head -n1)" != "$required" ]]; then
+            echo "::error::jq version $version is below required $required"
+            exit 1
+          fi
+
+      - name: Fetch PR diff
+        id: fetch-diff
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          pr_number="$PR_NUMBER"
+          if [[ -z "$pr_number" || "$pr_number" == "0" ]]; then
+            echo "::error::Could not determine PR number"
+            exit 1
+          fi
+          set +e
+          gh pr diff "$pr_number" > /tmp/pr-diff.patch
+          diff_exit=$?
+          set -e
+          if [[ "$diff_exit" -ne 0 ]]; then
+            echo "::error::Failed to fetch PR diff (exit $diff_exit)"
+            exit "$diff_exit"
+          fi
+          if [[ ! -s /tmp/pr-diff.patch ]]; then
+            echo "::warning::Empty PR diff — skipping Opus review"
+            echo "verdict=skipped" >> "$GITHUB_OUTPUT"
+            echo "passed=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "Diff size: $(wc -c < /tmp/pr-diff.patch) bytes"
+
+      - name: Run Opus review
+        id: review
+        if: steps.fetch-diff.outputs.verdict != 'skipped'
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          OPUS_MODEL: claude-opus-4-6
+          OPUS_SCORE_THRESHOLD: "9.0"
+          OPUS_TIMEOUT_SECONDS: "300"
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          chmod +x .opus-scripts/scripts/ci-opus-review.sh .opus-scripts/scripts/parse-reviews.sh
+          export PARSE_REVIEWS_SCRIPT="$(pwd)/.opus-scripts/scripts/parse-reviews.sh"
+
+          .opus-scripts/scripts/ci-opus-review.sh \
+            --repo "$REPO" \
+            --pr-number "$PR_NUMBER" \
+            --diff-file /tmp/pr-diff.patch \
+            --state-file /tmp/opus-state.json \
+            --result-file /tmp/opus-result.json
+
+          score="$(jq -r '.score // empty' /tmp/opus-result.json)"
+          verdict="$(jq -r '.verdict // "unknown"' /tmp/opus-result.json)"
+          cost_usd="$(jq -r '.costUsd // 0' /tmp/opus-result.json)"
+          passed="$(jq -r '.passed // false' /tmp/opus-result.json)"
+          timed_out="$(jq -r '.timedOut // false' /tmp/opus-result.json)"
+
+          echo "score=$score" >> "$GITHUB_OUTPUT"
+          echo "verdict=$verdict" >> "$GITHUB_OUTPUT"
+          echo "cost-usd=$cost_usd" >> "$GITHUB_OUTPUT"
+          echo "passed=$passed" >> "$GITHUB_OUTPUT"
+
+          if [[ "$timed_out" == "true" ]]; then
+            echo "::warning::Opus review timed out — failing open"
+          fi
+
+          echo "### Opus Review Result" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Metric | Value |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|--------|-------|" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Score | $score |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Verdict | $verdict |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Cost | \$$cost_usd |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Passed | $passed |" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Post findings as PR comment
+        if: always() && steps.fetch-diff.outputs.verdict != 'skipped' && steps.review.outputs.verdict != 'skipped'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+        run: |
+          pr_number="$PR_NUMBER"
+          repo="$REPO"
+          result_file="/tmp/opus-result.json"
+          marker="## 🎭 Opus 4.6 Code Review"
+
+          if [[ ! -f "$result_file" ]]; then
+            echo "No result file — skipping comment posting"
+            exit 0
+          fi
+
+          findings_count="$(jq -r '.findings | length' "$result_file")"
+          score="$(jq -r '.score // "N/A"' "$result_file")"
+          verdict="$(jq -r '.verdict // "unknown"' "$result_file")"
+          cost_usd="$(jq -r '.costUsd // 0' "$result_file")"
+
+          NL=$'\n'
+          body="${marker}${NL}${NL}"
+          body+="**Score:** $score / 10.0 | **Verdict:** $verdict | **Cost:** \$$cost_usd${NL}${NL}"
+
+          if [[ "$findings_count" -gt 0 ]]; then
+            body+="### Findings ($findings_count)${NL}${NL}"
+            findings_body="$(jq -r '.findings[] |
+              (if .severity == "high" then "🔴"
+               elif .severity == "low" then "💡"
+               else "⚠️" end) as $emoji |
+              ($emoji + " **[" + ((.severity // "medium") | tostring) + "]** `" +
+                ((.file // "unknown") | tostring) +
+                (if .line and .line != null then ":" + (.line | tostring) else "" end) +
+                "`\n" +
+                (if .issue and .issue != null then "  " + (.issue | tostring) + "\n" else "" end) +
+                (if .fix and .fix != null then "  **Fix:** " + (.fix | tostring) + "\n" else "" end) +
+                "\n")' "$result_file")"
+            body+="$findings_body"
+          else
+            body+="✅ No findings.${NL}"
+          fi
+
+          existing_comment_ids="$(gh api "repos/$repo/issues/$pr_number/comments" --paginate --jq '.[] | select(.user.type == "Bot" and (.body // "" | contains("## 🎭 Opus 4.6 Code Review"))) | .id')"
+          if [[ -n "$existing_comment_ids" ]]; then
+            while IFS= read -r comment_id; do
+              [[ -z "$comment_id" ]] && continue
+              gh api -X DELETE "repos/$repo/issues/comments/$comment_id" || true
+            done <<< "$existing_comment_ids"
+          fi
+
+          printf '%s' "$body" | gh pr comment "$pr_number" --body-file - || true
+
+      - name: Set check result
+        if: always()
+        env:
+          PASSED: ${{ steps.fetch-diff.outputs.passed || steps.review.outputs.passed }}
+          VERDICT: ${{ steps.fetch-diff.outputs.verdict || steps.review.outputs.verdict }}
+        run: |
+          if [[ "$VERDICT" == "skipped" || "$VERDICT" == "timeout" ]]; then
+            echo "Review was $VERDICT — passing"
+            exit 0
+          fi
+          if [[ "$PASSED" != "true" ]]; then
+            echo "::error::Opus review score below threshold"
+            exit 1
+          fi
