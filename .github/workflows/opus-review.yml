@@ -1,0 +1,11 @@
+# Opus 4.6 automated code review — calls the shared reusable workflow
+name: Opus Review
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+jobs:
+  opus-review:
+    uses: skillbar-ai/.github/.github/workflows/opus-review.yml@main
+    secrets:
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
