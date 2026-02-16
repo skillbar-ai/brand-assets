@@ -1,5 +1,5 @@
-# Opus 4.6 automated code review — standalone (no workflow_call)
-# Scripts sourced from skillbar-ai/.github (public)
+# Opus 4.6 automated code review — standalone
+# Scripts downloaded from org's .github repo via API
 name: Opus Review
 
 on:
@@ -22,12 +22,17 @@ jobs:
       - name: Checkout repo
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.2.2
 
-      - name: Checkout Opus scripts
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.2.2
-        with:
-          repository: skillbar-ai/.github
-          path: .opus-scripts
-          sparse-checkout: scripts
+      - name: Download Opus scripts
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p .opus-scripts
+          org="${GITHUB_REPOSITORY_OWNER}"
+          for script in ci-opus-review.sh parse-reviews.sh; do
+            gh api "repos/${org}/.github/contents/scripts/${script}" --jq '.content' | base64 -d > ".opus-scripts/${script}"
+            chmod +x ".opus-scripts/${script}"
+          done
+          echo "Downloaded scripts from ${org}/.github"
 
       - name: Verify jq version (>= 1.6)
         run: |
@@ -79,11 +84,9 @@ jobs:
           OPUS_TIMEOUT_SECONDS: "300"
           REPO: ${{ github.repository }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
+          PARSE_REVIEWS_SCRIPT: .opus-scripts/parse-reviews.sh
         run: |
-          chmod +x .opus-scripts/scripts/ci-opus-review.sh .opus-scripts/scripts/parse-reviews.sh
-          export PARSE_REVIEWS_SCRIPT="$(pwd)/.opus-scripts/scripts/parse-reviews.sh"
-
-          .opus-scripts/scripts/ci-opus-review.sh \
+          .opus-scripts/ci-opus-review.sh \
             --repo "$REPO" \
             --pr-number "$PR_NUMBER" \
             --diff-file /tmp/pr-diff.patch \
