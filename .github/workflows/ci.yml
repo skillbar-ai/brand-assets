@@ -32,7 +32,8 @@ jobs:
           fi
           version="$(jq --version | sed 's/^jq-//')"
           required="1.6"
-          if [[ "$(printf '%s\n' "$required" "$version" | sort -V | head -n1)" != "$required" ]]; then
+          if [[ "$(printf '%s
+' "$required" "$version" | sort -V | head -n1)" != "$required" ]]; then
             echo "jq version $version is below required $required"
             exit 1
           fi
@@ -52,7 +53,7 @@ jobs:
             git ls-files '*.sh' '*.bash'
             git ls-files | while IFS= read -r f; do
               [[ "$f" == *.sh || "$f" == *.bash ]] && continue
-              [[ -f "$f" ]] && head -1 "$f" | grep -qE '^#!.*\b(ba)?sh\b' && echo "$f" || true
+              [[ -f "$f" ]] && head -1 "$f" | grep -qE '^#!.*(ba)?sh' && echo "$f" || true
             done
           } | sort -u > /tmp/shell-files-raw.txt
           mapfile -t files < /tmp/shell-files-raw.txt
@@ -60,7 +61,8 @@ jobs:
             echo "has_files=false" >> "$GITHUB_OUTPUT"
           else
             echo "has_files=true" >> "$GITHUB_OUTPUT"
-            printf '%s\n' "${files[@]}" > /tmp/shell-files.txt
+            printf '%s
+' "${files[@]}" > /tmp/shell-files.txt
           fi
 
       - name: Enforce shell formatting (shfmt)
@@ -84,9 +86,10 @@ jobs:
           done
 
       - name: Secret scan (gitleaks)
-        uses: gitleaks/gitleaks-action@dcedce43c6f43de0b836d1fe38946645c9c638dc # v2.3.9
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          GITLEAKS_VERSION="8.24.3"
+          curl -sSfL "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" | tar xz
+          ./gitleaks detect --source . --verbose --redact
 
       - name: Run tests
         run: |
