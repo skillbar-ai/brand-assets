@@ -52,7 +52,7 @@ jobs:
             git ls-files '*.sh' '*.bash'
             git ls-files | while IFS= read -r f; do
               [[ "$f" == *.sh || "$f" == *.bash ]] && continue
-              [[ -f "$f" ]] && head -1 "$f" | grep -qE '^#!.*\b(ba)?sh\b' && echo "$f"
+              [[ -f "$f" ]] && head -1 "$f" | grep -qE '^#!.*\b(ba)?sh\b' && echo "$f" || true
             done
           } | sort -u > /tmp/shell-files-raw.txt
           mapfile -t files < /tmp/shell-files-raw.txt
